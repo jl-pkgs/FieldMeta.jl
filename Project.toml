@@ -1,14 +1,18 @@
 name = "FieldMeta"
 uuid = "f1d8a23c-77b4-4c1e-a2e7-9c8e3f4a1b22"
-authors = ["Dongdong Kong <kongdd.sysu@gmail.com>"]
 version = "0.1.0"
+authors = ["Dongdong Kong <kongdd.sysu@gmail.com>"]
+
+[deps]
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 
 [compat]
+DataFrames = "1.8.2"
 julia = "1.12"
 
 [extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Parameters = "d96e819e-fc66-5662-9728-84c9c7592b0a"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
 test = ["Test", "Parameters"]
