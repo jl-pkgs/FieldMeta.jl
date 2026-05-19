@@ -48,7 +48,7 @@ _fieldname(e::Expr) = e.head === :(::) ? e.args[1] :
                       _ispipe(e) ? _fieldname(e.args[2]) :
                       error("FieldMeta: bad field `$e`")
 
-# Strip the leftmost `|` value from the chain rooted at args[i]; mutate in place.
+# 从左到右，踢除第一个meta
 function _strip_leftmost!(args, i)
     e = args[i]
     _ispipe(e.args[2]) && return _strip_leftmost!(e.args, 2)
@@ -68,6 +68,7 @@ function _meta_slot(block_args, i)
     nothing
 end
 
+# 生成一个 (typname, fname, key) 专属的 _meta 方法；类型检查在结构体定义期执行一次。
 function _emit!(methods, typname, fname, key, val)
     haskey(REGISTRY, key) ||
         error("FieldMeta: key :$key not declared via @metadata")
@@ -110,10 +111,8 @@ macro metadata(name, default, checktyp=:Any)
     end)
 end
 
-# ---------------------------------------------------------------------------
-# Stackable per-key macro body and @fields multi-key macro.
-# ---------------------------------------------------------------------------
 
+## Stackable per-key macro body and @fields multi-key macro.
 function _process(ex, src::LineNumberNode, label::AbstractString, emit::Function)
     s = _find_struct(ex)
     s === nothing && error("$label: no struct found")

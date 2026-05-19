@@ -7,243 +7,135 @@
 #align(center)[
   #text(20pt, weight: "bold")[FieldMeta.jl 实现思路]
   #v(0.4em)
-  #text(11pt)[一个比 FieldMetadata.jl 更紧凑、更可调试的 struct 字段元数据方案]
+  #text(11pt)[一个比 FieldMetadata.jl 更紧凑的 struct 字段元数据方案]
   #v(0.6em)
   #text(9.5pt, fill: gray)[版本 0.1.0 · 共 ~160 行]
 ]
 
 #v(1em)
 
-= 1 目标
+= 1 宏展开后生成什么
 
-为 Julia struct 的每个字段附加键值元数据（如 `bounds`、`units`、`description`），
-并通过函数式 API 在运行时查询：
-
-```julia
-bounds(model, :x)        # (0.01, 0.5)
-description(model)       # ("Muskingum x", "time step")
-```
-
-要求：
-
-- *写法直观*：`@bounds @units @description struct ...` 堆叠，左右顺序与 `|` 值一一对应。
-- *类型稳定*：accessor 全部 `@inferred` 通过。
-- *分发简单*：不要为每个 key 各自生成一打 dispatch 方法（这是旧版 FieldMetadata.jl 的脆弱点之一）。
-- *可调试*：内部 helper 都是小函数，能在 REPL 里独立喂 `:(...)` quote 调用。
-
-= 2 核心数据结构
-
-整个包只有一个统一分发入口：
+理解整个包，最快的方式是看最终生成了什么。
 
 ```julia
-function _meta end
-@inline _meta(::Type, ::Val, ::Val{K}) where K = REGISTRY[K][1]
-```
+@metadata bounds nothing Any
+@metadata units  "-"    String
 
-- 由 `@fields` / 堆叠宏发射的特化方法形如：
-  ```julia
-  _meta(::Type{<:Muskingum}, ::Val{:x}, ::Val{:bounds}) = (0.01, 0.5)
-  ```
-- 命中 → 返回特化值（带类型检查）；未命中 → fallback 取注册表的默认值。
-
-注册表本身：
-
-```julia
-const REGISTRY = Dict{Symbol, Tuple{Any, Type}}()
-# REGISTRY[:bounds] = (nothing, Any)
-# REGISTRY[:units]  = ("-", String)
-```
-
-`@metadata` 只往 `REGISTRY` 写一行 `(default, check)`，然后生成 accessor 包装、
-以及一个用户级的堆叠宏 `@bounds`。
-
-= 3 AST 层处理
-
-== 3.1 `|` 是 Julia 自带的左结合运算符
-
-```
-a | b | c | d   ≡   ((a | b) | c) | d
-```
-
-解析树：
-
-```
-:call :|
-├── :call :|
-│   ├── :call :|
-│   │   ├── a
-│   │   └── b      ← 最左值
-│   └── c
-└── d              ← 最右值
-```
-
-要让"最外层宏对应最左 `|` 值"，每个堆叠宏只需做一件事：
-*把最内层 `:|` 节点替换为它的 lhs*，并取走它的 rhs 作为本次元数据值。
-
-// #pagebreak()
-
-== 3.2 关键 helper：`_strip_leftmost!`
-
-整个包最核心的一段代码（只有 7 行）：
-
-```julia
-function _strip_leftmost!(args, i)
-    e = args[i]
-    _ispipe(e.args[2]) && return _strip_leftmost!(e.args, 2)
-    val = e.args[3]
-    args[i] = e.args[2]
-    val
+@bounds @units struct Muskingum
+    x::Float64 | (0.01, 0.5) | "m/s"
+    dt::Float64
 end
 ```
 
-调用约定：
-- `args[i]` 是一个 `:|` Expr 链。
-- 函数原地修改 `args[i]`（剥掉最内层），返回被剥掉的值。
-
-REPL 演示：
+等价于：
 
 ```julia
-julia> import FieldMeta: _strip_leftmost!
-julia> holder = Any[:(x::Float64 | (0.01, 0.5) | "m" | "label")]
-julia> _strip_leftmost!(holder, 1)
-:((0.01, 0.5))
-julia> holder
-1-element Vector{Any}:
- :(x::Float64 | "m" | "label")
-julia> _strip_leftmost!(holder, 1), _strip_leftmost!(holder, 1)
-("m", "label")
-julia> holder[1]
-:(x::Float64)
-```
-
-== 3.3 宏扩展顺序
-
-Julia 宏扩展是*从外向内*。`@bounds @units @description struct ...` 的过程：
-
-#table(columns: (auto, 1fr, 1fr),
-  align: (left, left, left),
-  stroke: 0.5pt + gray,
-  table.header[阶段][输入][剥离 / 输出],
-  [`@bounds` 先跑], [`x::T \| (0.01, 0.5) \| "-" \| "lbl"`], [取 `(0.01, 0.5)`，余 `x::T \| "-" \| "lbl"`],
-  [`@units` 跑],    [`x::T \| "-" \| "lbl"`],                [取 `"-"`，余 `x::T \| "lbl"`],
-  [`@description`], [`x::T \| "lbl"`],                       [取 `"lbl"`，余 `x::T`],
-  [最终 struct],    [`struct ... x::T ... end`],             [纯净 struct 进入编译]
-)
-
-= 4 两种用户 API
-
-== 4.1 堆叠形式（`@bounds` / `@units` / ...）
-
-每个 `@metadata` 声明都顺带生成一个同名宏：
-
-```julia
-macro $name(ex)
-    $FieldMeta._stack(ex, $q, __source__)
+struct Muskingum          # pipe 被剥干净
+    x::Float64
+    dt::Float64
 end
+
+# 每个 (类型, 字段, key) → 专属方法，直接返回常量
+@inline _meta(::Type{<:Muskingum}, ::Val{:x}, ::Val{:bounds}) = (0.01, 0.5)
+@inline _meta(::Type{<:Muskingum}, ::Val{:x}, ::Val{:units})  = "m/s"
+
+# @metadata 为每个 key 生成的默认 fallback
+@inline _meta(::Type, ::Val, ::Val{:bounds}) = nothing
+@inline _meta(::Type, ::Val, ::Val{:units})  = "-"
 ```
 
-`_stack` 流程：
+用户调用 `bounds(model, :x)` 时，内部走 `_meta(Muskingum, Val{:x}(), Val{:bounds}())`。
+三层优先级：*专属方法 > 按 key 默认 > MethodError（未声明的 key）*。
+热路径全是方法派发，无 Dict 查询，完全类型稳定。
 
-+ `_find_struct(ex)` —— 递归找到 `:struct` Expr（穿过任意层 macrocall，如 `@with_kw`）。
-+ 遍历字段块 `s.args[3].args`。
-+ 每行用 `_meta_slot` 定位元数据所在的 `(args, idx, fname)`。
-+ 调 `_strip_leftmost!` 剥一层，并 emit 一条 `_meta(::Type{<:T}, ::Val{f}, ::Val{k})` 方法。
-+ 返回 `Expr(:block, src, esc(ex), methods...)`，把（已被原地修改的）`ex` 交还给下一个宏。
+= 2 pipe 链与堆叠宏
 
-== 4.2 一次性命名形式（`@fields`）
+`|` 在 Julia 里是左结合运算符：
 
-```julia
-@fields @with_kw struct Muskingum{FT}
-    x::FT  = 0.35  | (bounds=(0.01, 0.5), units="-", description="x")
-    dt::FT = 1.0   | (units="h")
-end
+```
+x::T | v1 | v2 | v3   ≡   ((x::T | v1) | v2) | v3
 ```
 
-`@fields` 不剥层，而是直接把 `(k=v, k=v)` 这个 `:tuple` 展开成多条 `_emit!`。
-和堆叠形式共用同一套 `_meta` 方法表，accessor 行为完全一致。
+最左值 `v1` 在最深的 `:|` 节点。Julia 宏从外向内展开，所以：
 
-// #pagebreak()
+- `@bounds`（最外层）剥走 `v1`，余下 `x::T | v2 | v3` 交给下一个宏。
+- `@units` 剥走 `v2`，余下 `x::T | v3`。
+- `@description` 剥走 `v3`，余下纯净的 `x::T`。
 
-= 5 形式 A 与 形式 B
+核心实现是 `_strip_leftmost!(args, i)`（7 行），递归找到最深的 `:|` 节点，
+原地替换并返回被剥掉的值。
 
-字段行有两种带元数据的形态：
+= 3 类型检查在何时发生
 
-#table(columns: (1fr, 2fr),
+#table(columns: (auto, 1fr),
   align: (left, left),
   stroke: 0.5pt + gray,
-  table.header[形态][AST],
-  [`a::T | v`],          [`Expr(:call, :\|, :(a::T), v)`，行就是 `:|` 表达式],
-  [`a::T = default | v`], [`Expr(:(=), :(a::T), Expr(:call, :\|, default, v))`，`:|` 嵌在 `:(=)` 内],
+  table.header[时机][做什么],
+  [宏展开期],     [从 `REGISTRY` 读约束 `c`，检查 key 是否已声明（未声明立即报错）],
+  [结构体定义期], [`let v = $val; v isa c || _typeerror(...)` 执行一次],
+  [访问期],       [专属方法直接 `return $val`，*零额外开销*],
 )
 
-`_meta_slot` 用一个分支就把两种形态统一返回 `(slot_args, slot_idx, fieldname)`：
+`REGISTRY` 只在 `@metadata` 执行时写入、宏展开时读出，运行期不接触。
 
-```julia
-function _meta_slot(block_args, i)
-    line = block_args[i]
-    line isa Expr || return nothing
-    _ispipe(line) && return (block_args, i, _fieldname(line))
-    line.head === :(=) && _ispipe(line.args[2]) &&
-        return (line.args, 2, _fieldname(line.args[1]))
-    nothing
-end
+= 4 内部函数调用链
+
+`@bounds struct ... end` 展开时，调用关系如下：
+
+```
+macro bounds(ex)
+  _stack(ex, :bounds, src)
+    _process(ex, src, emit_fn)
+      1. _find_struct(ex)              # 找到 :struct，穿过 @with_kw 等 macrocall
+      2. for each field line:
+           a. _meta_slot(block, i)     # 该行有 pipe 吗？→ (args, idx, fname)
+           b. _strip_leftmost!(args, idx)  # 原地剥最左 | 值，返回 val
+           c. _emit!(methods, T, fname, key, val)
+                - REGISTRY[key]        # 读约束 c（宏展开期，一次性）
+                - push! 生成的方法块:
+                    let v=val; v isa c || _typeerror(...) end  # 定义期执行
+                    @inline _meta(::Type{<:T}, ::Val{f}, ::Val{k}) = val
+      3. return Expr(:block, esc(ex), methods...)
 ```
 
-下游 `_strip_leftmost!` 和 `_emit!` 不需要知道是哪种形态。
+步骤 2 是顺序的三步（a → b → c），不是嵌套调用。`ex` 在步骤 2 里被原地修改（pipe 已剥），步骤 3 返回时它已经是干净的 struct。
 
-= 6 类型检查
+== 多宏堆叠时的展开顺序
 
-每条 emit 的方法体里做一次 `isa` 检查，不命中时通过专门的 `@noinline`
-错误函数抛出，避免让正常路径吃错误处理的字节码：
+堆叠不靠代码里的循环，而是 Julia 宏展开机制本身驱动。
+展开（编译期）和执行（运行期）是两个阶段：
 
-```julia
-@inline function _meta(::Type{<:T}, ::Val{f}, ::Val{k})
-    v = $val
-    _, c = REGISTRY[k]
-    v isa c || _typeerror(T, k, v, c)
-    v
-end
+*展开阶段*（外 → 内，编译期）：
+```
+@bounds @units struct ... x | v1 | v2 end
+  @bounds 展开 → block { esc(@units struct...x|v2 end),   # ex 放前面
+                          @inline _meta(...bounds...) = v1 }
+  @units  展开 → block { esc(struct...x end),              # ex 放前面
+                          @inline _meta(...units...) = v2 }
 ```
 
-= 7 与 `Parameters.@with_kw` 的协作
+*执行阶段*（顺序执行，运行期）：
+```
+1. struct ... x end                        ← struct 先定义
+2. @inline _meta(...units...)  = v2        ← 方法引用 T，T 已存在 ✓
+3. @inline _meta(...bounds...) = v1
+```
 
-约定写法：`@bounds @units @description @with_kw struct ...`。
+`_process` 始终把 `esc(ex)` 放在 `methods` 之前返回，
+保证 struct 定义先于任何引用它的 `_meta` 方法。
 
-执行顺序（外→内）：
+= 5 调试入口
 
-+ `@bounds` 看到 `@units @description @with_kw struct...`，递归找到 `:struct`，
-  剥掉它字段里的最左 `|`，发射 `bounds` 方法，返回的 block 中仍然包含未展开的
-  `@units @description @with_kw`。
-+ `@units`、`@description` 依次同理。
-+ 最后 `@with_kw` 看到的 struct 字段已经是纯净的 `x::FT = 0.35`，正常生成
-  关键字构造器。
+```julia
+import FieldMeta: _ispipe, _find_struct, _fieldname, _strip_leftmost!, _meta_slot
 
-因此元数据宏完全感知不到 `@with_kw` 的存在，只关心找到 `:struct` 然后剥层。
+# 直接喂 quote 调用内部函数
+holder = Any[:(x::Int | (0, 1) | "m")]
+_strip_leftmost!(holder, 1)   # => :((0, 1))
 
-= 8 调试入口
+# 观察完整展开
+@macroexpand @bounds @units struct Foo; x::Int | 1 | "u"; end
+```
 
-`test/test-internals.jl` 里每个内部 helper 都附了 testset + 例子。
-建议的调试流程：
-
-+ 在 REPL `using FieldMeta`，`import FieldMeta: _ispipe, _find_struct, _fieldname, _strip_leftmost!, _meta_slot`。
-+ 用 `:(struct Foo; x::Int \| (0,1); end)` 这种 quote 直接喂内部函数。
-+ `@macroexpand @bounds @units struct ... end` 观察展开树。
-+ 配合 `docs/playground.ipynb` 里准备好的可执行 cell。
-
-= 9 设计取舍
-
-#table(columns: (1fr, 1fr, 1fr),
-  align: (left, left, left),
-  stroke: 0.5pt + gray,
-  table.header[决策][选择][代价 / 备注],
-  [元数据存储], [单一 `_meta` + 注册表 fallback], [每次访问要查一次 `REGISTRY` 默认值（仅在 miss 路径）],
-  [字段名解析], [`_fieldname` 递归穿 `::` / `=` / `\|`], [新增 wrapper 时需在此处加分支],
-  [`_` 跳过], [`val === :_` 不 emit，落到 fallback], [字段不能用 `_` 当字面值],
-  [类型检查时机], [访问时（命中 emit 方法里）], [声明 struct 时不立即报错，需要至少访问一次],
-)
-
-= 10 后续可扩展
-
-- `@fields T begin ... end` —— 给已有 struct 后期补 / 改元数据。
-- `@inferred` 计入测试 —— 当前 `@inferred` 跑过但不计 `@test` 计数。
-- 字段名重叠处理（同字段同 key 多次 emit 会触发 method overwrite warning）。
+每个 helper 的行为在 `test/test-internals.jl` 里都有可执行示例。
