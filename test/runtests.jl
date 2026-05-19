@@ -7,6 +7,7 @@ import FieldMeta: @metadata, @fields, MetadataError, fieldmeta
 @metadata default nothing Any
 @metadata label "" String
 
+include("test-internals.jl")
 include("test-chain.jl")
 include("test-fields.jl")
 ##
