@@ -73,12 +73,9 @@ end
     @test label(c) == ("", "", "")
 end
 
-## Type checking — wrong value type throws MetadataError on first access.
-@fields struct WrongType
-    a::Int | (description=:a_symbol_not_a_string,)
-end
-
+## Type checking — wrong value type throws MetadataError at struct definition time.
 @testset "type check on metadata value" begin
-    @test_throws MetadataError description(WrongType, :a)
-    @test_throws MetadataError description(WrongType)
+    @test_throws MetadataError @eval @fields struct WrongType
+        a::Int | (description=:a_symbol_not_a_string,)
+    end
 end

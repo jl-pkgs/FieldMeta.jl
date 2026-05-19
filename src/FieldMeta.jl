@@ -13,10 +13,10 @@ Base.showerror(io::IO, e::MetadataError) = print(io, e.msg)
 # (default, type-constraint) per declared key.
 const REGISTRY = Dict{Symbol,Tuple{Any,Type}}()
 
-# Per-(T, field, key) methods are emitted by the macros.
-# Fallback returns the registered default.
+# Per-(T, field, key) methods are emitted by `_emit!`.
+# Per-key fallback (constant default) is emitted by `@metadata`.
+# Querying an undeclared key intentionally raises MethodError.
 function _meta end
-@inline _meta(::Type, ::Val, ::Val{K}) where K = REGISTRY[K][1]
 
 @generated function _allfields(::Type{T}, ::Val{K}) where {T,K}
     Expr(:tuple, (:(_meta(T, Val{$(QuoteNode(f))}(), Val{K}())) for f in fieldnames(T))...)
@@ -25,9 +25,7 @@ end
 @inline fieldmeta(::Type{T}, f::Symbol, k::Symbol) where T = _meta(T, Val{f}(), Val{k}())
 @inline fieldmeta(x, f::Symbol, k::Symbol) = fieldmeta(typeof(x), f, k)
 
-# ---------------------------------------------------------------------------
-# AST helpers
-# ---------------------------------------------------------------------------
+## AST helpers
 _ispipe(e) = e isa Expr && e.head === :call && length(e.args) == 3 && e.args[1] === :|
 
 function _find_struct(ex)
@@ -71,21 +69,20 @@ function _meta_slot(block_args, i)
 end
 
 function _emit!(methods, typname, fname, key, val)
+    haskey(REGISTRY, key) ||
+        error("FieldMeta: key :$key not declared via @metadata")
+    c = REGISTRY[key][2]
     qk, qf = QuoteNode(key), QuoteNode(fname)
     push!(methods, esc(quote
-        @inline function $FieldMeta._meta(::Type{<:$typname}, ::Val{$qf}, ::Val{$qk})
-            v = $val
-            _, c = $FieldMeta.REGISTRY[$qk]
-            v isa c || $FieldMeta._typeerror($typname, $qk, v, c)
-            v
+        let v = $val
+            v isa $c || $FieldMeta._typeerror($typname, $qk, v, $c)
         end
+        @inline $FieldMeta._meta(::Type{<:$typname}, ::Val{$qf}, ::Val{$qk}) = $val
     end))
 end
 
-# ---------------------------------------------------------------------------
-# @metadata: declare a key, generate accessors + a stackable per-key macro.
-# ---------------------------------------------------------------------------
 
+## @metadata: declare a key, generate accessors + a stackable per-key macro.
 """
     @metadata name default [Type=Any]
 
@@ -100,12 +97,13 @@ macro metadata(name, default, checktyp=:Any)
             d isa c || $FieldMeta._typeerror(:_default, $q, d, c)
             $FieldMeta.REGISTRY[$q] = (d, c)
         end
-        $name(x, f::Symbol) = $FieldMeta._meta(typeof(x), Val{f}(), Val{$q}())
-        $name(::Type{T}, f::Symbol) where T = $FieldMeta._meta(T, Val{f}(), Val{$q}())
-        $name(x, ::Type{Val{F}}) where F = $FieldMeta._meta(typeof(x), Val{F}(), Val{$q}())
-        $name(::Type{T}, ::Type{Val{F}}) where {T,F} = $FieldMeta._meta(T, Val{F}(), Val{$q}())
-        $name(x) = $FieldMeta._allfields(typeof(x), Val{$q}())
-        $name(::Type{T}) where T = $FieldMeta._allfields(T, Val{$q}())
+        @inline $FieldMeta._meta(::Type, ::Val, ::Val{$q}) = $default
+        @inline $name(x, f::Symbol) = $FieldMeta._meta(typeof(x), Val{f}(), Val{$q}())
+        @inline $name(::Type{T}, f::Symbol) where T = $FieldMeta._meta(T, Val{f}(), Val{$q}())
+        @inline $name(x, ::Type{Val{F}}) where F = $FieldMeta._meta(typeof(x), Val{F}(), Val{$q}())
+        @inline $name(::Type{T}, ::Type{Val{F}}) where {T,F} = $FieldMeta._meta(T, Val{F}(), Val{$q}())
+        @inline $name(x) = $FieldMeta._allfields(typeof(x), Val{$q}())
+        @inline $name(::Type{T}) where T = $FieldMeta._allfields(T, Val{$q}())
         macro $name(ex)
             $FieldMeta._stack(ex, $q, __source__)
         end
@@ -159,5 +157,6 @@ macro fields(ex)
         end
     end)
 end
+
 
 end # module
